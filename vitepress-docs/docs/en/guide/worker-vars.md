@@ -10,6 +10,7 @@
 | `DOMAINS`                  | JSON        | All domains for temporary email, supports multiple domains             | `["awsl.uk", "dreamhunter2333.xyz"]` |
 | `JWT_SECRET`               | Text/Secret | Secret key for signing JWTs used in login and authentication. Use a random string, e.g. generated via `openssl rand -hex 32` | `a1b2c3d4...`                        |
 | `ADMIN_PASSWORDS`          | JSON        | Admin console passwords, console access disabled if not configured     | `["123", "456"]`                     |
+| `DISABLE_USER_SYSTEM` | Text/JSON | Block user system APIs and hide user interfaces; disabled by default | `true` |
 | `ENABLE_USER_CREATE_EMAIL` | Text/JSON   | Whether to allow users to create mailboxes, disabled if not configured | `true`                               |
 | `ENABLE_USER_DELETE_EMAIL` | Text/JSON   | Whether to allow users to delete emails, disabled if not configured    | `true`                               |
 | `ENABLE_MAIL_READ_STATUS` | Text/JSON | Enables read/unread mail state. Upgrade the database schema before enabling | `true` |
@@ -50,6 +51,7 @@ When `ADMIN_API_IP_WHITELIST` is unset or empty, source IPs are not restricted. 
 | `ENABLE_AUTO_REPLY`                   | Text/JSON | Allow automatic email replies. Sender filter (`source_prefix`) supports three modes: empty to match all senders, prefix for `startsWith` matching, or `/regex/` syntax for regex matching (e.g. `/@example\.com$/`) | `true`                                    |
 | `DEFAULT_SEND_BALANCE`                | Text/JSON | Default email sending balance. When greater than `0`, it is auto-initialized when users open the settings page or send mail for the first time. Defaults to `0` if unset                                                                                 | `1`                                       |
 | `ENABLE_ADDRESS_PASSWORD`             | Text/JSON | Enable address password feature, when enabled, passwords will be auto-generated for new addresses, supports password login and modification                                                                       | `true`                                    |
+| `ADDRESS_PASSWORD_LOGIN_ONLY` | Text/JSON | Default `false`; effective only with `ENABLE_ADDRESS_PASSWORD=true`. Shows only password login and hides the credential-login toggle on the login page. Currently controls only that page; legacy credentials, login links, API access, and JWT lifetimes remain unchanged | `true` |
 | `ENABLE_AGENT_EMAIL_INFO`             | Text/JSON | Whether to show AI Agent access info in the frontend "Address Credentials & Connection Methods" dialog (Address JWT, parsed-mail APIs, skill link)                                      | `true`                                    |
 | `SMTP_IMAP_PROXY_CONFIG`              | JSON      | Show SMTP/IMAP proxy connection info in the frontend "Address Credentials & Connection Methods" dialog; display-only, does not start the proxy service, which must be deployed separately | See example below                         |
 | `SEND_MAIL_DOMAINS`                   | JSON      | Restrict which sender domains can use the `SEND_MAIL` binding; when unset or empty, all domains are allowed                                                                                                     | `["example.com", "mail.example.com"]`     |
@@ -105,11 +107,11 @@ When `ADMIN_API_IP_WHITELIST` is unset or empty, source IPs are not restricted. 
 | `ENABLE_CHECK_JUNK_MAIL`        | Text/JSON | Whether to enable junk mail checking, used with the following two lists                                                | `false`                    |
 | `JUNK_MAIL_CHECK_LIST`          | JSON      | Existence check; registered failure/error results are junk, while `none` and SPF/DKIM `neutral` are treated as absent  | `["spf", "dkim", "dmarc"]` |
 | `JUNK_MAIL_FORCE_PASS_LIST`     | JSON      | Strict pass check; every item must explicitly return `pass`, otherwise it is treated as junk                           | `["spf", "dkim", "dmarc"]` |
-| `FORWARD_ADDRESS_LIST`          | JSON      | Global forward address list, disabled if not configured, all emails will be forwarded to listed addresses when enabled | `["xxx@xxx.com"]`          |
+| `FORWARD_ADDRESS_LIST`          | JSON      | Global external-only forwarding via Cloudflare; does not use internal mailbox delivery. Disabled if not configured | `["xxx@xxx.com"]`          |
 | `REMOVE_EXCEED_SIZE_ATTACHMENT` | Text/JSON | If attachment exceeds 2MB, remove it, email may lose some information due to parsing                                   | `true`                     |
 | `REMOVE_ALL_ATTACHMENT`         | Text/JSON | Remove all attachments, email may lose some information due to parsing                                                 | `true`                     |
 | `ENABLE_MAIL_GZIP`             | Text/JSON | When enabled, new emails are gzip-compressed and stored in `raw_blob` column to save D1 database space. Existing plaintext `raw` data is automatically compatible for reading. **Run database migration first (`Admin -> Quick Setup -> Database -> Migrate Database` or `POST /admin/db_migration`) to ensure the `raw_blob` column exists before enabling. This feature adds compression/decompression CPU overhead, so enabling it on a paid Cloudflare Worker plan is recommended.** | `true`                     |
-| `CLEANUP_BATCH_SIZE`           | Number    | Per-run limit for mail, sent-mail, and creation/activity-based address cleanup. Defaults to `3000`, valid range `1-5000`. Smaller values reduce per-run D1 pressure; larger values clear backlogs faster | `3000` |
+| `CLEANUP_BATCH_SIZE`           | Number    | Per-run limit for built-in mail, sent-mail, and address cleanup tasks. Defaults to `3000`, valid range `1-5000`. Smaller values reduce per-run D1 pressure; larger values clear backlogs faster | `3000` |
 
 > [!NOTE]
 > Authentication results follow their standards: SPF `none` means no usable domain or SPF record was found, and SPF `neutral` must be treated like `none`; DKIM `none` means the message was unsigned, and DKIM `neutral` is also treated as unsigned; DMARC `none` means no applicable DMARC policy was found. Unregistered results and unsupported method versions are ignored. `JUNK_MAIL_CHECK_LIST` treats these results as absent, while `JUNK_MAIL_FORCE_PASS_LIST` still requires an explicit supported `pass`
@@ -191,6 +193,8 @@ When `ADMIN_API_IP_WHITELIST` is unset or empty, source IPs are not restricted. 
 
 ## Email Forwarding Related Variables
 
+Admin or `SUBDOMAIN_FORWARD_ADDRESS_LIST` rules targeting addresses under domains listed in `DOMAINS` reuse receive processing for storage, extraction and notifications, but do not forward or auto-reply again. Unknown addresses follow the existing recipient-rejection setting. Originals are kept by default; enable “Delete original after forwarding” in a rule to delete the current original at the end of mail processing after successful delivery. `FORWARD_ADDRESS_LIST` only forwards to external addresses through Cloudflare and does not use internal mailbox delivery. No database migration is required.
+
 | Variable Name                     | Type | Description                                                                              | Example   |
 | --------------------------------- | ---- | ---------------------------------------------------------------------------------------- | --------- |
 | `SUBDOMAIN_FORWARD_ADDRESS_LIST`  | JSON | Subdomain/rule forwarding configuration, supports filtering by domain and source regex  | See below |
@@ -201,6 +205,7 @@ When `ADMIN_API_IP_WHITELIST` is unset or empty, source IPs are not restricted. 
 >
 > - `domains`: Target domain list, matches all domains if empty
 > - `forward`: Forward destination address
+> - `deleteOriginal`: Delete the original at the end of mail processing after this rule succeeds (optional, default `false`; self-forwards and failures do not delete it; original mail and attachment links stop working after deletion)
 > - `sourcePatterns`: Source address regex list (optional)
 > - `sourceMatchMode`: Match mode, `any` (match any, default) or `all` (match all)
 >
